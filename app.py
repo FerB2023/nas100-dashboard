@@ -1,13 +1,17 @@
 """
 NAS100 Intelligence Dashboard
-Dashboard Streamlit que integra el agente técnico y el agente de noticias.
+Dashboard Streamlit con auto-refresh cada 5 minutos y alertas por email.
 """
 
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 import pandas as pd
+import smtplib
+import os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
@@ -17,17 +21,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ── Auto-refresh cada 5 minutos (300.000 ms) ─────────────────────────────────
+st_autorefresh(interval=300_000, key="autorefresh")
+
 # ── CSS personalizado ─────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main { background-color: #0f1117; }
-    .metric-card {
-        background: #1a1d2e;
-        border: 1px solid #2d3250;
-        border-radius: 12px;
-        padding: 1.2rem 1.5rem;
-        margin-bottom: 1rem;
-    }
     .conclusion-box {
         border-radius: 12px;
         padding: 1.5rem 2rem;
@@ -59,8 +59,82 @@ st.markdown("""
         font-weight: 600;
         width: 100%;
     }
+    .alert-badge {
+        background: #0d2d1f;
+        border: 1.5px solid #1D9E75;
+        border-radius: 8px;
+        padding: .4rem 1rem;
+        font-size: .85rem;
+        color: #4ade80;
+        margin-top: .5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+def enviar_alerta(conclusion: str, tech: dict, news: dict):
+    """Envía email de alerta cuando las señales se alinean."""
+    gmail_user = os.getenv("GMAIL_USER")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
+    dest_email = os.getenv("DEST_EMAIL")
+
+    if not all([gmail_user, gmail_pass, dest_email]):
+        return False
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"🚨 NAS100 Alerta — {conclusion[:50]}"
+        msg["From"] = gmail_user
+        msg["To"] = dest_email
+
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;background:#0f1117;color:#fff;padding:2rem">
+        <h2 style="color:#3266ad">📊 NAS100 Intelligence — Alerta</h2>
+        <p style="font-size:1.1rem;font-weight:bold">{conclusion}</p>
+        <hr style="border-color:#2d3250">
+        <h3>Análisis Técnico</h3>
+        <ul>
+            <li>Precio: <strong>{tech['precio_actual']:,.0f}</strong> ({tech['cambio_pct']:+.2f}%)</li>
+            <li>Tendencia: <strong>{tech['tendencia']}</strong></li>
+            <li>RSI: <strong>{tech['rsi']}</strong> — {tech['senal_rsi']}</li>
+            <li>SMA20: {tech['sma20']:,.0f} | SMA200: {tech['sma200']:,.0f}</li>
+            <li>MACD: {tech['macd']:+.0f}</li>
+        </ul>
+        <h3>Análisis de Noticias</h3>
+        <ul>
+            <li>Sentimiento: <strong>{news['sentimiento']}</strong></li>
+            <li>🟢 Alcistas: {news['alcistas']} | 🔴 Bajistas: {news['bajistas']} | ⚪ Neutras: {news['neutras']}</li>
+        </ul>
+        <p style="color:#888;font-size:.8rem">Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
+        </body></html>
+        """
+
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, dest_email, msg.as_string())
+        return True
+    except Exception as e:
+        st.warning(f"Error enviando email: {e}")
+        return False
+
+
+def debe_alertar(tech: dict, news: dict) -> tuple[bool, str]:
+    """Determina si las señales justifican una alerta."""
+    t = tech.get("tendencia", "")
+    n = news.get("sentimiento", "")
+    rsi = tech.get("rsi", 50)
+
+    if t == "Alcista" and n == "Alcista":
+        return True, "✅ Señales ALCISTAS alineadas — momento favorable para operar al alza"
+    if t == "Bajista" and n == "Bajista":
+        return True, "🔴 Señales BAJISTAS alineadas — presión vendedora confirmada"
+    if rsi > 75:
+        return True, f"⚠️ RSI en zona de sobrecompra extrema ({rsi})"
+    if rsi < 25:
+        return True, f"⚠️ RSI en zona de sobreventa extrema ({rsi})"
+    return False, ""
 
 
 # ── Carga de datos con caché ──────────────────────────────────────────────────
@@ -76,36 +150,29 @@ def cargar_noticias():
     return get_news_summary()
 
 
-def determinar_conclusion(tech: dict, news: dict) -> tuple[str, str, str]:
-    """Devuelve (texto, clase_css, emoji) según las señales combinadas."""
+def determinar_conclusion(tech: dict, news: dict) -> tuple[str, str]:
     t = tech.get("tendencia", "")
     n = news.get("sentimiento", "")
-
     if t == "Alcista" and n == "Alcista":
-        return ("✅ Momento favorable para operar al alza — técnicos y flujo de noticias alineados.",
-                "bull", "✅")
+        return "✅ Momento favorable para operar al alza — técnicos y noticias alineados.", "bull"
     elif t == "Bajista" and n == "Bajista":
-        return ("🔴 Precaución: presión vendedora en precio y noticias — evitar largos.",
-                "bear", "🔴")
+        return "🔴 Precaución: presión vendedora en precio y noticias — evitar largos.", "bear"
     elif t == "Alcista" and n == "Bajista":
-        return ("⚠️ Señales mixtas: técnicos alcistas pero noticias negativas — esperar confirmación.",
-                "mixed", "⚠️")
+        return "⚠️ Señales mixtas: técnicos alcistas pero noticias negativas — esperar.", "mixed"
     elif t == "Bajista" and n == "Alcista":
-        return ("⚠️ Señales mixtas: noticias positivas pero precio en tendencia bajista — cautela.",
-                "mixed", "⚠️")
+        return "⚠️ Señales mixtas: noticias positivas pero precio bajista — cautela.", "mixed"
     else:
-        return ("⚠️ Mercado en zona de indecisión — sin señal clara. Mejor esperar.",
-                "mixed", "⚠️")
+        return "⚠️ Mercado en zona de indecisión — sin señal clara. Mejor esperar.", "mixed"
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
 col_title, col_btn = st.columns([4, 1])
 with col_title:
     st.markdown("## 📊 NAS100 Intelligence Dashboard")
-    st.caption(f"Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    st.caption(f"Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')} · Auto-refresh cada 5 min")
 with col_btn:
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 Actualizar análisis"):
+    if st.button("🔄 Actualizar ahora"):
         st.cache_data.clear()
         st.rerun()
 
@@ -122,9 +189,18 @@ if "error" in tech:
     st.error(f"Error en agente técnico: {tech['error']}")
     st.stop()
 
+# ── Alertas automáticas ───────────────────────────────────────────────────────
+alerta, msg_alerta = debe_alertar(tech, news)
+if alerta:
+    enviado = enviar_alerta(msg_alerta, tech, news)
+    if enviado:
+        st.markdown(
+            f'<div class="alert-badge">📧 Alerta enviada a fbenitez_02@hotmail.com — {msg_alerta}</div>',
+            unsafe_allow_html=True
+        )
+
 # ── Métricas superiores ────────────────────────────────────────────────────────
 m1, m2, m3, m4, m5 = st.columns(5)
-
 cambio_color = "normal" if tech["cambio_dia"] >= 0 else "inverse"
 m1.metric("💹 NAS100", f"{tech['precio_actual']:,.0f}",
           f"{tech['cambio_dia']:+,.0f} ({tech['cambio_pct']:+.2f}%)", delta_color=cambio_color)
@@ -140,7 +216,6 @@ st.divider()
 col_left, col_right = st.columns([3, 2])
 
 with col_left:
-    # Gráfico de precio
     st.subheader("📈 Precio NAS100 — últimos 60 días")
     df_precio = pd.DataFrame({
         "Fecha": pd.to_datetime(tech["fechas_recientes"]),
@@ -167,7 +242,6 @@ with col_left:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Indicadores técnicos
     st.subheader("🔧 Indicadores técnicos")
     ic1, ic2, ic3 = st.columns(3)
     ic1.metric("SMA 20", f"{tech['sma20']:,.0f}",
@@ -177,25 +251,19 @@ with col_left:
     ic3.metric("SMA 200", f"{tech['sma200']:,.0f}",
                "↑ Tendencia alcista" if tech["precio_actual"] > tech["sma200"] else "↓ Tendencia bajista",
                delta_color="normal" if tech["precio_actual"] > tech["sma200"] else "inverse")
-
     ic4, ic5, ic6 = st.columns(3)
     ic4.metric("RSI", tech["rsi"], tech["senal_rsi"])
     ic5.metric("BB Superior", f"{tech['bb_superior']:,.0f}")
     ic6.metric("BB Inferior", f"{tech['bb_inferior']:,.0f}")
-
     ic7, ic8 = st.columns(2)
     ic7.metric("Máximo 52s", f"{tech['maximo_52s']:,.0f}")
     ic8.metric("Mínimo 52s", f"{tech['minimo_52s']:,.0f}")
 
 with col_right:
-    # Análisis de noticias
     st.subheader("📰 Análisis de noticias")
-
-    total = news.get("total", 1) or 1
     alc = news.get("alcistas", 0)
     baj = news.get("bajistas", 0)
     neu = news.get("neutras", 0)
-
     fig_pie = go.Figure(go.Pie(
         labels=["Alcistas", "Bajistas", "Neutras"],
         values=[alc, baj, neu],
@@ -212,13 +280,12 @@ with col_right:
     )
     st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Lista de noticias
     st.markdown("**Últimas noticias clasificadas**")
     for n in news.get("noticias", [])[:8]:
         cl = n.get("clasificacion", "Neutral")
         css = "bull-news" if cl == "Alcista" else "bear-news" if cl == "Bajista" else "neut-news"
         emoji = "🟢" if cl == "Alcista" else "🔴" if cl == "Bajista" else "⚪"
-        title = n.get("title", "")[:65] + ("..." if len(n.get("title","")) > 65 else "")
+        title = n.get("title", "")[:65] + ("..." if len(n.get("title", "")) > 65 else "")
         razon = n.get("razon", "")
         st.markdown(
             f'<div class="news-item {css}">{emoji} <strong>{title}</strong><br>'
@@ -229,10 +296,9 @@ with col_right:
 # ── Conclusión final ──────────────────────────────────────────────────────────
 st.divider()
 st.subheader("🤖 Conclusión del Agente")
-texto, css_clase, _ = determinar_conclusion(tech, news)
+texto, css_clase = determinar_conclusion(tech, news)
 st.markdown(f'<div class="conclusion-box {css_clase}">{texto}</div>', unsafe_allow_html=True)
 
-# Detalle expandible
 with st.expander("Ver detalle completo del análisis"):
     dc1, dc2 = st.columns(2)
     with dc1:
