@@ -189,11 +189,15 @@ if "error" in tech:
     st.error(f"Error en agente técnico: {tech['error']}")
     st.stop()
 
-# ── Alertas automáticas ───────────────────────────────────────────────────────
+# ── Alertas automáticas (una sola vez por señal) ──────────────────────────────
+if "ultima_alerta" not in st.session_state:
+    st.session_state.ultima_alerta = ""
+
 alerta, msg_alerta = debe_alertar(tech, news)
-if alerta:
+if alerta and msg_alerta != st.session_state.ultima_alerta:
     enviado = enviar_alerta(msg_alerta, tech, news)
     if enviado:
+        st.session_state.ultima_alerta = msg_alerta
         st.markdown(
             f'<div class="alert-badge">📧 Alerta enviada a fbenitez_02@hotmail.com — {msg_alerta}</div>',
             unsafe_allow_html=True
