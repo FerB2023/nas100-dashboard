@@ -189,19 +189,34 @@ if "error" in tech:
     st.error(f"Error en agente técnico: {tech['error']}")
     st.stop()
 
-# ── Alertas automáticas (una sola vez por señal) ──────────────────────────────
-if "ultima_alerta" not in st.session_state:
-    st.session_state.ultima_alerta = ""
+# ── Alertas automáticas (una sola vez por señal, cooldown 2 horas) ───────────
+import time, json as _json
+
+ALERT_FILE = "/tmp/nas100_last_alert.json"
+
+def leer_ultima_alerta() -> tuple[str, float]:
+    try:
+        data = _json.loads(open(ALERT_FILE).read())
+        return data.get("msg",""), data.get("ts", 0)
+    except:
+        return "", 0
+
+def guardar_ultima_alerta(msg: str):
+    with open(ALERT_FILE, "w") as f:
+        _json.dump({"msg": msg, "ts": time.time()}, f)
 
 alerta, msg_alerta = debe_alertar(tech, news)
-if alerta and msg_alerta != st.session_state.ultima_alerta:
-    enviado = enviar_alerta(msg_alerta, tech, news)
-    if enviado:
-        st.session_state.ultima_alerta = msg_alerta
-        st.markdown(
-            f'<div class="alert-badge">📧 Alerta enviada a fbenitez_02@hotmail.com — {msg_alerta}</div>',
-            unsafe_allow_html=True
-        )
+if alerta:
+    ultima_msg, ultimo_ts = leer_ultima_alerta()
+    cooldown_ok = (time.time() - ultimo_ts) > 7200  # 2 horas entre alertas iguales
+    if msg_alerta != ultima_msg or cooldown_ok:
+        enviado = enviar_alerta(msg_alerta, tech, news)
+        if enviado:
+            guardar_ultima_alerta(msg_alerta)
+            st.markdown(
+                f'<div class="alert-badge">📧 Alerta enviada a fbenitez_02@hotmail.com — {msg_alerta}</div>',
+                unsafe_allow_html=True
+            )
 
 # ── Métricas superiores ────────────────────────────────────────────────────────
 m1, m2, m3, m4, m5 = st.columns(5)
